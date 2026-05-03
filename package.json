@@ -1,16 +1,16 @@
 {
-  "name": "@watergis/terrain-rgb",
+  "name": "dem-tiles",
   "version": "2.1.1",
-  "description": "This module is to get elevation from terrain RGB tilesets by longitude and latitude.",
+  "description": "Decode elevation from Terrain RGB and Terrarium raster tilesets by longitude and latitude. Fork of @watergis/terrain-rgb.",
   "type": "module",
-  "main": "dist/terrain-rgb.umd.js",
+  "main": "dist/dem-tiles.umd.js",
   "types": "dist/types/index.d.ts",
-  "module": "dist/terrain-rgb.es.js",
+  "module": "dist/dem-tiles.es.js",
   "exports": {
     ".": {
       "types": "./dist/types/index.d.ts",
-      "import": "./dist/terrain-rgb.es.js",
-      "require": "./dist/terrain-rgb.umd.js"
+      "import": "./dist/dem-tiles.es.js",
+      "require": "./dist/dem-tiles.umd.js"
     }
   },
   "files": [
@@ -21,6 +21,7 @@
   "scripts": {
     "dev": "vite dev",
     "build": "tsc && vite build",
+    "prepare": "npm run build",
     "build:cjs": "tsc --project . --module commonjs --outDir ./dist",
     "build:esm": "tsc --project . --module es2015 --outDir ./es6",
     "lint": "prettier --check . && eslint .",
@@ -31,14 +32,25 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/watergis/terrain-rgb.git"
+    "url": "git+https://github.com/alrico88/dem-tiles.git"
   },
-  "author": "Jin IGARASHI",
+  "author": {
+    "name": "Jin IGARASHI"
+  },
+  "contributors": [
+    {
+      "name": "alrico88"
+    }
+  ],
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/watergis/terrain-rgb/issues"
+    "url": "https://github.com/alrico88/dem-tiles/issues"
   },
-  "homepage": "https://github.com/watergis/terrain-rgb#readme",
+  "homepage": "https://github.com/alrico88/dem-tiles#readme",
+  "funding": {
+    "type": "individual",
+    "url": "https://github.com/watergis/terrain-rgb"
+  },
   "devDependencies": {
     "@changesets/cli": "^2.27.12",
     "@eslint/js": "^9.20.0",
@@ -54,6 +66,7 @@
     "global-mercator": "^3.1.0",
     "globals": "^15.14.0",
     "lefthook": "^1.10.10",
+    "lru-cache": "^11.3.5",
     "prettier": "^3.5.0",
     "publint": "^0.3.4",
     "typedoc": "^0.27.7",

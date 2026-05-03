@@ -1,4 +1,30 @@
 import { lngLatToGoogle, lngLatToTile } from "global-mercator";
+import type { LRUCache } from "lru-cache";
+
+type TileCacheValue = Uint8Array | undefined;
+type TileIndex = [number, number, number];
+type Rgba = [number, number, number, number];
+type SamplingMode = "nearest" | "median";
+
+interface RasterRequest {
+  url: string;
+  tile: TileIndex;
+  lng: number;
+  lat: number;
+}
+
+export interface BaseTileOptions {
+  tileCache?: LRUCache<string, TileCacheValue>;
+  /**
+   * Pixel sampling strategy. "nearest" reads one pixel. "median" returns the
+   * median elevation from a square window around the target pixel.
+   */
+  sampling?: SamplingMode;
+  /**
+   * Pixel radius for median sampling. 1 means a 3x3 window.
+   */
+  sampleRadius?: number;
+}
 
 /**
  * Abstract class for terrain RGB tiles
@@ -13,6 +39,25 @@ export abstract class BaseTile {
   protected minzoom: number;
 
   protected maxzoom: number;
+
+  private tileCache?: LRUCache<string, TileCacheValue>;
+
+  private sampling: SamplingMode;
+
+  private sampleRadius: number;
+
+  private readonly inFlightRequests = new Map<
+    string,
+    Promise<TileCacheValue>
+  >();
+
+  private decodeCanvas?: HTMLCanvasElement | OffscreenCanvas;
+
+  private decodeContext?:
+    | CanvasRenderingContext2D
+    | OffscreenCanvasRenderingContext2D;
+
+  private extension: string;
 
   /**
    * Constructor
@@ -29,13 +74,21 @@ export abstract class BaseTile {
     minzoom: number,
     maxzoom: number,
     tms: boolean,
+    options?: BaseTileOptions,
   ) {
     this.url = url;
     this.tileSize = tileSize;
     this.tms = tms;
     this.minzoom = minzoom;
     this.maxzoom = maxzoom;
-    this.tms = tms;
+    this.tileCache = options?.tileCache;
+    const ext = this.getUrlExtension(this.url) ?? "png";
+    if (ext !== "png" && ext !== "webp") {
+      throw new Error(`Invalid file extension: ${ext}`);
+    }
+    this.extension = ext;
+    this.sampling = options?.sampling ?? "nearest";
+    this.sampleRadius = Math.max(0, Math.floor(options?.sampleRadius ?? 1));
   }
 
   /**
@@ -45,41 +98,50 @@ export abstract class BaseTile {
    * @returns the value calculated by certain formula
    */
   protected getValue(lnglat: number[], z: number): Promise<number | undefined> {
-    return new Promise(
-      (resolve: (value: number | undefined) => void, reject) => {
-        const lng = lnglat[0];
-        const lat = lnglat[1];
-        let zoom = z;
-        if (z > this.maxzoom) {
-          zoom = this.maxzoom;
-        } else if (z < this.minzoom) {
-          zoom = this.minzoom;
+    return this.getValues([lnglat], z).then((values) => values[0]);
+  }
+
+  /**
+   * Get values for multiple coordinates at one zoom level.
+   * Coordinates sharing a tile reuse one decoded tile and each pixel lookup is O(1).
+   * @param lnglats coordinates
+   * @param z zoom level
+   * @returns values calculated by the subclass formula
+   */
+  protected async getValues(
+    lnglats: number[][],
+    z: number,
+  ): Promise<Array<number | undefined>> {
+    const values = new Array<number | undefined>(lnglats.length);
+    const groups = new Map<string, Array<RasterRequest & { index: number }>>();
+
+    for (let index = 0; index < lnglats.length; index += 1) {
+      const request = this.createRasterRequest(lnglats[index], z);
+      const group = groups.get(request.url);
+      if (group) {
+        group.push({ ...request, index });
+      } else {
+        groups.set(request.url, [{ ...request, index }]);
+      }
+    }
+
+    await Promise.all(
+      Array.from(groups.values(), async (group) => {
+        const pixels = await this.getTilePixels(group[0].url);
+        for (const request of group) {
+          values[request.index] = pixels
+            ? this.getValueFromPixels(
+                pixels,
+                request.tile,
+                request.lng,
+                request.lat,
+              )
+            : undefined;
         }
-        const tile = this.tms
-          ? lngLatToTile([lng, lat], zoom)
-          : lngLatToGoogle([lng, lat], zoom);
-        const url: string = this.url
-          .replace(/{x}/g, tile[0].toString())
-          .replace(/{y}/g, tile[1].toString())
-          .replace(/{z}/g, tile[2].toString());
-        let ext = this.getUrlExtension(url);
-        // console.log(ext)
-        if (!ext) {
-          ext = "png";
-        }
-        switch (ext) {
-          case "png":
-          case "webp":
-            this.getValueFromRaster(url, tile, lng, lat).then((height) => {
-              resolve(height);
-            });
-            break;
-          default:
-            reject(new Error(`Invalid file extension: ${ext}`));
-            break;
-        }
-      },
+      }),
     );
+
+    return values;
   }
 
   /**
@@ -90,39 +152,99 @@ export abstract class BaseTile {
    * @param lat latitude
    * @returns the value calculated from coordinates. If tile does not exist returns undefined
    */
-  private async getValueFromRaster(
-    url: string,
-    tile: number[],
+  private getValueFromPixels(
+    pixels: Uint8Array,
+    tile: TileIndex,
     lng: number,
     lat: number,
-  ): Promise<number | undefined> {
+  ): number | undefined {
+    const pixPos = this.lngLatToPixelPosition(tile, lng, lat);
+    if (pixPos === undefined) return undefined;
+
+    if (this.sampling === "median" && this.sampleRadius > 0) {
+      return this.getMedianValueFromPixels(pixels, pixPos);
+    }
+
+    return this.getValueFromPixel(pixels, pixPos[0], pixPos[1]);
+  }
+
+  private async getTilePixels(url: string): Promise<TileCacheValue> {
+    if (this.tileCache?.has(url)) {
+      return this.tileCache.get(url);
+    }
+
+    const inFlight = this.inFlightRequests.get(url);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const request = this.fetchAndDecodeTile(url).then((pixels) => {
+      this.tileCache?.set(url, pixels);
+      return pixels;
+    });
+
+    this.inFlightRequests.set(url, request);
+    try {
+      return await request;
+    } finally {
+      this.inFlightRequests.delete(url);
+    }
+  }
+
+  private async fetchAndDecodeTile(url: string): Promise<TileCacheValue> {
     const res = await fetch(url);
     if (!res.ok) {
       if (res.status === 404) {
         return undefined;
-      } else {
-        throw new Error(`Failed to fetch tile: ${res.statusText}`);
       }
+      throw new Error(`Failed to fetch tile: ${res.statusText}`);
     }
     const blob = await res.blob();
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement("canvas");
-        canvas.width = img.width;
-        canvas.height = img.height;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return reject(new Error("Failed to create canvas context"));
-        ctx.drawImage(img, 0, 0);
-        const pixels = ctx.getImageData(0, 0, img.width, img.height).data;
-        const rgba = this.pixels2rgba(new Uint8Array(pixels), tile, lng, lat);
-        // console.log(rgba)
-        const height = this.calc(rgba[0], rgba[1], rgba[2], rgba[3]);
-        resolve(height);
-      };
-      img.onerror = () => resolve(undefined);
-      img.src = URL.createObjectURL(blob);
-    });
+    try {
+      const bitmap = await createImageBitmap(blob);
+      try {
+        return this.decodeImage(bitmap, bitmap.width, bitmap.height);
+      } finally {
+        bitmap.close();
+      }
+    } catch {
+      return undefined;
+    }
+  }
+
+  private decodeImage(
+    image: CanvasImageSource,
+    width: number,
+    height: number,
+  ): Uint8Array {
+    const ctx = this.getDecodeContext(width, height);
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(image, 0, 0);
+    const imageData = ctx.getImageData(0, 0, width, height).data;
+    return new Uint8Array(imageData);
+  }
+
+  private getDecodeContext(
+    width: number,
+    height: number,
+  ): CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D {
+    if (!this.decodeCanvas) {
+      this.decodeCanvas =
+        typeof OffscreenCanvas !== "undefined"
+          ? new OffscreenCanvas(width, height)
+          : document.createElement("canvas");
+    }
+
+    if (this.decodeCanvas.width !== width) this.decodeCanvas.width = width;
+    if (this.decodeCanvas.height !== height) this.decodeCanvas.height = height;
+
+    if (!this.decodeContext) {
+      this.decodeContext = this.decodeCanvas.getContext("2d") ?? undefined;
+    }
+    if (!this.decodeContext) {
+      throw new Error("Failed to create canvas context");
+    }
+    return this.decodeContext;
   }
 
   /**
@@ -131,38 +253,72 @@ export abstract class BaseTile {
    * @param r red
    * @param g green
    * @param b blue
-   * @param a alfa
+   * @param a alpha
    */
   protected abstract calc(r: number, g: number, b: number, a: number): number;
 
-  /**
-   * Get RGBA values from coordinates information
-   * @param pixels pixels info
-   * @param tile tile index info
-   * @param lng longitude
-   * @param lat latitude
-   * @returns RGBA values
-   */
-  private pixels2rgba(
-    pixels: Uint8Array,
-    tile: number[],
+  private lngLatToPixelPosition(
+    tile: TileIndex,
     lng: number,
     lat: number,
-  ): number[] {
-    const data = [];
-    for (let i = 0; i < pixels.length; i += 4) {
-      const r = pixels[i];
-      const g = pixels[i + 1];
-      const b = pixels[i + 2];
-      const a = pixels[i + 3];
-      const rgba = [r, g, b, a];
-      data.push(rgba);
-    }
+  ): number[] | undefined {
     const bbox = this.tileToBBOX(tile);
-    const pixPos = this.getPixelPosition(lng, lat, bbox);
-    const pos = pixPos[0] + pixPos[1] * this.tileSize;
-    const rgba = data[pos];
-    return rgba;
+    return this.getPixelPosition(lng, lat, bbox);
+  }
+
+  private getValueFromPixel(
+    pixels: Uint8Array,
+    x: number,
+    y: number,
+  ): number | undefined {
+    const rgba = this.getRgbaFromPixel(pixels, x, y);
+    if (rgba === undefined) return undefined;
+
+    const [r, g, b, a] = rgba;
+    if (a === 0) return undefined;
+    return this.calc(r, g, b, a);
+  }
+
+  private getRgbaFromPixel(
+    pixels: Uint8Array,
+    x: number,
+    y: number,
+  ): Rgba | undefined {
+    if (x < 0 || x >= this.tileSize || y < 0 || y >= this.tileSize) {
+      return undefined;
+    }
+    const offset = (x + y * this.tileSize) * 4;
+    return [
+      pixels[offset],
+      pixels[offset + 1],
+      pixels[offset + 2],
+      pixels[offset + 3],
+    ];
+  }
+
+  private getMedianValueFromPixels(
+    pixels: Uint8Array,
+    pixPos: number[],
+  ): number | undefined {
+    const [centerX, centerY] = pixPos;
+    const values: number[] = [];
+    const minX = Math.max(0, centerX - this.sampleRadius);
+    const maxX = Math.min(this.tileSize - 1, centerX + this.sampleRadius);
+    const minY = Math.max(0, centerY - this.sampleRadius);
+    const maxY = Math.min(this.tileSize - 1, centerY + this.sampleRadius);
+
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        const value = this.getValueFromPixel(pixels, x, y);
+        if (value !== undefined) values.push(value);
+      }
+    }
+
+    if (values.length === 0) return undefined;
+    values.sort((a, b) => a - b);
+    const mid = Math.floor(values.length / 2);
+    if (values.length % 2 === 1) return values[mid];
+    return (values[mid - 1] + values[mid]) / 2;
   }
 
   /**
@@ -183,6 +339,27 @@ export abstract class BaseTile {
     const xPx = Math.floor(pixelWidth * widthPct);
     const yPx = Math.floor(pixelHeight * (1 - heightPct));
     return [xPx, yPx];
+  }
+
+  private createRasterRequest(lnglat: number[], z: number): RasterRequest {
+    const lng = lnglat[0];
+    const lat = lnglat[1];
+    let zoom = z;
+    if (z > this.maxzoom) {
+      zoom = this.maxzoom;
+    } else if (z < this.minzoom) {
+      zoom = this.minzoom;
+    }
+    const tile = (
+      this.tms
+        ? lngLatToTile([lng, lat], zoom)
+        : lngLatToGoogle([lng, lat], zoom)
+    ) as TileIndex;
+    const url: string = this.url
+      .replace(/{x}/g, tile[0].toString())
+      .replace(/{y}/g, tile[1].toString())
+      .replace(/{z}/g, tile[2].toString());
+    return { url, tile, lng, lat };
   }
 
   /**
@@ -206,7 +383,7 @@ export abstract class BaseTile {
    * var bbox = tileToBBOX([5, 10, 10])
    * //=bbox
    */
-  private tileToBBOX(tile: number[]): number[] {
+  private tileToBBOX(tile: TileIndex): number[] {
     const e = this.tile2lon(tile[0] + 1, tile[2]);
     const w = this.tile2lon(tile[0], tile[2]);
     const s = this.tile2lat(tile[1] + 1, tile[2]);

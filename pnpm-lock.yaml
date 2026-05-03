@@ -49,6 +49,9 @@ importers:
       lefthook:
         specifier: ^1.10.10
         version: 1.10.10
+      lru-cache:
+        specifier: ^11.3.5
+        version: 11.3.5
       prettier:
         specifier: ^3.5.0
         version: 3.5.0
@@ -1661,6 +1664,13 @@ packages:
       {
         integrity: sha512-+WKqsK294HMSc2jEbNgpHpd0JfIBhp7rEV4aqXWqFr6AlXov+SlcgB1Fv01y2kGe3Gc8nMW7VA0SrGuSkRfIEg==,
       }
+
+  lru-cache@11.3.5:
+    resolution:
+      {
+        integrity: sha512-NxVFwLAnrd9i7KUBxC4DrUhmgjzOs+1Qm50D3oF1/oL+r1NpZ4gA7xvG0/zJ8evR7zIKn4vLf7qTNduWFtCrRw==,
+      }
+    engines: { node: 20 || >=22 }
 
   lunr@2.3.9:
     resolution:
@@ -3315,6 +3325,8 @@ snapshots:
   lodash.merge@4.6.2: {}
 
   lodash.startcase@4.4.0: {}
+
+  lru-cache@11.3.5: {}
 
   lunr@2.3.9: {}
 

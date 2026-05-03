@@ -1,4 +1,4 @@
-import { BaseTile } from "./base";
+import { BaseTile, type BaseTileOptions } from "./base";
 
 /**
  * Terrarium class implementation
@@ -18,8 +18,9 @@ export class Terrarium extends BaseTile {
     minzoom = 5,
     maxzoom = 15,
     tms = false,
+    options?: BaseTileOptions,
   ) {
-    super(url, tileSize, minzoom, maxzoom, tms);
+    super(url, tileSize, minzoom, maxzoom, tms, options);
   }
 
   /**
@@ -28,9 +29,23 @@ export class Terrarium extends BaseTile {
    * @param z zoom level
    * @returns an altitude calculated from terrain RGB information
    */
-  public async getElevation(lnglat: number[], z: number): Promise<number> {
+  public async getElevation(lnglat: number[], z: number): Promise<number | undefined> {
     const height = await this.getValue(lnglat, z);
     return height;
+  }
+
+  /**
+   * Get altitudes for multiple coordinates at one zoom level.
+   * Coordinates belonging to the same tile share fetch, decode, and cache work.
+   * @param lnglats coordinates
+   * @param z zoom level
+   * @returns altitudes calculated from terrarium information
+   */
+  public async getElevations(
+    lnglats: number[][],
+    z: number,
+  ): Promise<Array<number | undefined>> {
+    return this.getValues(lnglats, z);
   }
 
   /**
@@ -39,9 +54,10 @@ export class Terrarium extends BaseTile {
    * @param r red
    * @param g green
    * @param b blue
+   * @param a alpha
    * @returns an elevation calculated
    */
-  protected calc(r: number, g: number, b: number): number {
+  protected calc(r: number, g: number, b: number, _a: number): number {
     const elev = r * 256 + g + b / 256 - 32768;
     return parseInt(elev.toFixed(0));
   }

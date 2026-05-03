@@ -1,4 +1,4 @@
-# @watergis/terrain-rgb
+# dem-tiles
 
 ## 2.1.1
 

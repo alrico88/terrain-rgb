@@ -10,8 +10,8 @@ export default defineConfig({
     sourcemap: true,
     lib: {
       entry: resolve(__dirname, "src/lib/index.ts"),
-      name: "terrainrgb",
-      fileName: (format) => `terrain-rgb.${format}.js`,
+      name: "demTiles",
+      fileName: (format) => `dem-tiles.${format}.js`,
       formats: ["es", "umd"],
     },
   },
